@@ -98,8 +98,7 @@ class Visualizer:
 
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.executor_future = None
-        self._progress_dialog = None
-        self._last_progress_update_time = None
+        self.is_live_processing_active = False
 
         self.stereo_methods = stereo_methods
         self.stereo_methods_output = {}
@@ -130,25 +129,27 @@ class Visualizer:
         self.separation_height = int(round(0.5 * em))
         self._settings_panel = gui.Vert(0, gui.Margins(0.25 * em, 0.25 * em, 0.25 * em, 0.25 * em))
 
+        controls_horiz = gui.Horiz(0, gui.Margins(0, 0, 0, 0))
         self._next_image_button = gui.Button("Next Image")
         self._next_image_button.set_on_clicked(self._next_image_clicked)
-        self._settings_panel.add_child(self._next_image_button)
+        controls_horiz.add_child(self._next_image_button)
+
+        controls_horiz.add_stretch()
+
+        self._live_button = gui.Button("Start Live")
+        self._live_button.set_on_clicked(self._toggle_live_mode)
+        controls_horiz.add_child(self._live_button)
+        # Add the horizontal layout containing buttons TO the settings panel
+        self._settings_panel.add_child(controls_horiz)
+
+        if self.source.is_live():
+            self._next_image_button.enabled = True
+            self._live_button.visible = True
+        else:
+            self._next_image_button.enabled = True
+            self._live_button.visible = False
+
         if not self.source.is_live():
-            # self._next_image_button = gui.Button("Next")
-            # self._next_image_button.set_on_clicked(self._next_image_clicked)
-            # horiz.add_child(self._next_image_button)
-
-            # self.images_combo = gui.ListView()
-            # input_pairs = self.source.get_pair_list()
-            # self.images_combo.set_items(input_pairs)
-            # self.images_combo.selected_index = 0
-            # self.images_combo.set_max_visible_items(3)
-            # self.images_combo.set_on_selection_changed(self._image_selected)
-            # self.images_combo.tooltip = self.images_combo.selected_value
-            # self._settings_panel.add_child(self.images_combo)
-            # self._settings_panel.add_fixed(self.separation_height)
-            # horiz.add_child(self.images_combo)
-
             self._settings_panel.add_fixed(self.separation_height)
             self.images_combo = gui.Combobox()
             input_pairs = self.source.get_pair_list()
@@ -194,9 +195,6 @@ class Visualizer:
         reset_cam_button = gui.Button("Reset Camera")
         reset_cam_button.set_on_clicked(self._reset_camera)
         view_ctrls.add_child(reset_cam_button)
-        # self._show_axes = gui.Checkbox("Show axes")
-        # self._show_axes.set_on_checked(self._on_show_axes)
-        # view_ctrls.add_child(self._show_axes)
         
         horiz = gui.Horiz(0, gui.Margins(0.25 * em, 0.25 * em, 0.25 * em, 0.25 * em))
         label = gui.Label("Max depth (m)")
@@ -214,6 +212,10 @@ class Visualizer:
         self._settings_panel.add_fixed(self.separation_height)
         self._settings_panel.add_child(view_ctrls)
 
+        self._settings_panel.add_stretch()
+        self._processing_status_label = gui.Label("Idle")
+        self._settings_panel.add_child(self._processing_status_label)
+
         w.set_on_layout(self._on_layout)
         w.add_child(self._scene)
         w.add_child(self._settings_panel)
@@ -221,10 +223,8 @@ class Visualizer:
         self._on_algo_list_selected(self.algo_list.selected_value, False)
         self._apply_settings()
 
-        if self.source.is_live():
-            self.read_next_pair ()
-        else:
-            self._image_selected (None, None)
+        if not self.source.is_live():
+            self._image_selected(None, None)
 
     def _on_key_pressed (self, keyEvent):
         if keyEvent.key == gui.KeyName.Q:
@@ -247,9 +247,25 @@ class Visualizer:
             input.calibration.downsample(input.left_image.shape[1], input.left_image.shape[0])
 
     def read_next_pair (self):
-        input = self.source.get_next_pair ()
-        self._update_pair_index ()
-        self._process_input (input)
+        if self.executor_future is not None and not self.executor_future.done():
+             print("DEBUG: read_next_pair called while processing, skipping fetch.")
+             return # Don't fetch a new pair if the previous one isn't done
+
+        print("DEBUG: Attempting to read next pair from source...")
+        self._processing_status_label.text = "Fetching frame..." # Update status
+        try:
+            input_pair = self.source.get_next_pair()
+            self._update_pair_index() # Update dropdown if needed
+            self._processing_status_label.text = "Processing frame..." # Update status
+            self._process_input(input_pair)
+        except Exception as e:
+             print(f"ERROR: Failed to get or process next pair: {e}")
+             import traceback
+             traceback.print_exc()
+             self._processing_status_label.text = "Error fetching frame!"
+             # Optionally stop live mode on error
+             if self.is_live_processing_active:
+                self._toggle_live_mode()
 
     def _process_input (self, input):
         print(f"DEBUG Visualizer: Processing input with shape left={input.left_image.shape if input.left_image is not None else None}, right={input.right_image.shape if input.right_image is not None else None}")
@@ -273,15 +289,18 @@ class Visualizer:
             return
 
         # Create Open3D camera intrinsics from Calibration
+        # *** Use the actual image dimensions AFTER downsampling ***
+        img_height = input.left_image.shape[0]
+        img_width = input.left_image.shape[1]
         self.o3dCameraIntrinsic = o3d.camera.PinholeCameraIntrinsic(
-            int(input.calibration.width),
-            int(input.calibration.height),
-            input.calibration.fx,
-            input.calibration.fy,
-            input.calibration.cx0, # Use cx0 for the left camera intrinsics
+            int(img_width),       # Use actual width
+            int(img_height),      # Use actual height
+            input.calibration.fx, # Adjust fx, fy, cx, cy based on downsampling? 
+            input.calibration.fy, # Calibration object should handle this via .downsample()
+            input.calibration.cx0,
             input.calibration.cy
         )
-        print(f"DEBUG Visualizer: Updated o3dCameraIntrinsic: w={self.o3dCameraIntrinsic.width}, h={self.o3dCameraIntrinsic.height}, fx={self.o3dCameraIntrinsic.intrinsic_matrix[0,0]}")
+        print(f"DEBUG Visualizer: Updated o3dCameraIntrinsic using image shape: w={self.o3dCameraIntrinsic.width}, h={self.o3dCameraIntrinsic.height}, fx={self.o3dCameraIntrinsic.intrinsic_matrix[0,0]}")
 
         # Create a copy of the images to avoid modifying the originals
         left_display = input.left_image.copy()
@@ -302,7 +321,6 @@ class Visualizer:
         if self.input.has_data():
             print("DEBUG Visualizer: Input has data, proceeding with processing")
             assert self.input.left_image.shape[1] == self.input.calibration.width and self.input.left_image.shape[0] == self.input.calibration.height
-            self._clear_outputs()
             self._run_current_method()
 
     def update_once (self):
@@ -428,7 +446,11 @@ class Visualizer:
         self._apply_settings()
 
     def _next_image_clicked(self):
-        self.read_next_pair ()
+        if not self.is_live_processing_active: # Only allow if not in live mode
+             print("DEBUG: Next image button clicked.")
+             self.read_next_pair()
+        else:
+             print("DEBUG: Next image button ignored (live mode active).")
 
     def _image_selected(self, combo_idx, combo_val):
         idx = self.images_combo.selected_index
@@ -449,167 +471,260 @@ class Visualizer:
         for m in self._reload_settings_functions:
             m()
 
-    def _check_run_complete(self):                
+    def _check_run_complete(self):
+        if self.executor_future is None:
+             return # Nothing running
+
         if not self.executor_future.done():
-            if self._progress_dialog is None:
-                self._progress_dialog = self._show_progress_dialog("Running the current method", f"Computing {self.algo_list.selected_value}...")
-            now = time.time()
-            if (now - self._last_progress_update_time > 0.1):
-                self._last_progress_update_time = now
-                self._run_progress.value += (1.0 - self._run_progress.value) / 16.0
+            # Optionally update status label here if you want a "Processing..." indicator
+            # self._processing_status_label.text = "Processing..." # Can be verbose
             return
 
-        if self._progress_dialog:
-            self.window.close_dialog()
-        self._progress_dialog = None
-
+        # --- Processing is done ---
         print("DEBUG: Retrieving stereo computation result")
-        stereo_output = self.executor_future.result()
-        self.executor_future = None
+        try:
+            stereo_output = self.executor_future.result()
+        except Exception as e:
+             print(f"ERROR: Stereo computation failed: {e}")
+             import traceback
+             traceback.print_exc()
+             self._processing_status_label.text = "Error!"
+             self.executor_future = None # Reset future on error
+             # Stop live mode on error? Maybe desirable.
+             if self.is_live_processing_active:
+                 self._toggle_live_mode() # Turn off live mode
+             return
 
-        if stereo_output.disparity_pixels is None:
-            print("DEBUG: No disparity map in stereo output!")
-            return
-
-        print(f"DEBUG: Processing disparity map with shape: {stereo_output.disparity_pixels.shape}")
-        raw_disp = stereo_output.disparity_pixels
-        print(f"DEBUG: Raw Disparity Stats - min: {np.min(raw_disp):.2f}, max: {np.max(raw_disp):.2f}, mean: {np.mean(raw_disp):.2f}")
-        print(f"DEBUG: Raw Disparity - Num positive: {np.sum(raw_disp > 0)}, Num zero: {np.sum(raw_disp == 0)}, Num negative: {np.sum(raw_disp < 0)}")
-
-        x0,y0,x1,y1 = self.input.calibration.left_image_rect_normalized
-        x0 = int(x0*stereo_output.disparity_pixels.shape[1] + 0.5)
-        x1 = int(x1*stereo_output.disparity_pixels.shape[1] + 0.5)
-        y0 = int(y0*stereo_output.disparity_pixels.shape[0] + 0.5)
-        y1 = int(y1*stereo_output.disparity_pixels.shape[0] + 0.5)
-        valid_mask = np.zeros(stereo_output.disparity_pixels.shape, dtype=np.uint8)
-        valid_mask[y0:y1, x0:x1] = 1
-        stereo_output.disparity_pixels[valid_mask == 0] = -1.0
+        self.executor_future = None # Clear the future
 
         name = self.algo_list.selected_value
-        print("DEBUG: Creating color disparity map")
-        stereo_output.disparity_color = color_disparity(stereo_output.disparity_pixels, self.input.calibration)
-        show_color_disparity(name, stereo_output.disparity_color)
+        
+        # --- Point Cloud Creation --- 
+        # Create the Open3D PointCloud object here from the computed disparity
+        if stereo_output is not None and stereo_output.disparity_pixels is not None:
+            print("DEBUG [PCD Create]: Start - Have disparity map")
+            try:
+                # Calculate depth from disparity
+                print("DEBUG [PCD Create]: Calculating depth from disparity...")
+                depth_meters = StereoMethod.depth_meters_from_disparity(
+                    stereo_output.disparity_pixels, self.input.calibration
+                )
+                print(f"DEBUG [PCD Create]: Depth calculated. Shape: {depth_meters.shape}, dtype: {depth_meters.dtype}")
 
-        print("DEBUG: Updating stereo output and rendering")
+                # Clip depth based on slider
+                print("DEBUG [PCD Create]: Clipping depth...")
+                max_depth = self.depth_range_slider.double_value
+                depth_meters[depth_meters > max_depth] = 0 # Clip far points
+                depth_meters[depth_meters < 0] = 0      # Clip negative/invalid points
+                depth_meters[np.isnan(depth_meters)] = 0
+                depth_meters[np.isinf(depth_meters)] = 0
+                print(f"DEBUG [PCD Create]: Depth clipped. min: {np.min(depth_meters)}, max: {np.max(depth_meters)}")
+
+                # Get color image (use input left if method didn't provide one)
+                print("DEBUG [PCD Create]: Getting color image...")
+                if stereo_output.color_image_bgr is None:
+                    color_image = self.input.left_image.copy()
+                    print("DEBUG [PCD Create]: Using input left image as color.")
+                else:
+                    color_image = stereo_output.color_image_bgr
+                    print("DEBUG [PCD Create]: Using method's output color image.")
+                print(f"DEBUG [PCD Create]: Color image shape: {color_image.shape}, dtype: {color_image.dtype}")
+                
+                # Ensure color is RGB for Open3D
+                print("DEBUG [PCD Create]: Converting color to RGB...")
+                if len(color_image.shape) == 2: # Grayscale to BGR then RGB
+                     color_image = cv2.cvtColor(color_image, cv2.COLOR_GRAY2BGR)
+                o3d_color_np = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+                print(f"DEBUG [PCD Create]: Creating o3d.geometry.Image for color (shape: {o3d_color_np.shape}, dtype: {o3d_color_np.dtype})...")
+                o3d_color = o3d.geometry.Image(o3d_color_np)
+                print("DEBUG [PCD Create]: o3d color image created.")
+                
+                print("DEBUG [PCD Create]: Creating o3d.geometry.Image for depth...")
+                o3d_depth_np = depth_meters.astype(np.float32)
+                print(f"DEBUG [PCD Create]: Creating o3d.geometry.Image for depth (shape: {o3d_depth_np.shape}, dtype: {o3d_depth_np.dtype})...")
+                o3d_depth = o3d.geometry.Image(o3d_depth_np)
+                print("DEBUG [PCD Create]: o3d depth image created.")
+
+                # Create RGBD image
+                print("DEBUG [PCD Create]: Creating RGBD image...")
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    o3d_color,
+                    o3d_depth,
+                    depth_scale=1.0, # Depth is already in meters
+                    depth_trunc=max_depth, # Use slider value for truncation
+                    convert_rgb_to_intensity=False
+                )
+                print("DEBUG [PCD Create]: RGBD image created.")
+
+                # Create PointCloud from RGBD
+                print("DEBUG [PCD Create]: Checking o3dCameraIntrinsic...")
+                if self.o3dCameraIntrinsic is None:
+                    print("ERROR [PCD Create]: o3dCameraIntrinsic not set, cannot create point cloud!")
+                    stereo_output.point_cloud = None
+                else:
+                    print(f"DEBUG [PCD Create]: o3dCameraIntrinsic found: w={self.o3dCameraIntrinsic.width} h={self.o3dCameraIntrinsic.height} fx={self.o3dCameraIntrinsic.intrinsic_matrix[0,0]}")
+                    print("DEBUG [PCD Create]: Creating PointCloud from RGBD...")
+                    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
+                        rgbd, self.o3dCameraIntrinsic
+                    )
+                    print(f"DEBUG [PCD Create]: PointCloud created initially with {len(pcd.points)} points.")
+                    
+                    # Apply standard transform
+                    print("DEBUG [PCD Create]: Applying transform...")
+                    pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+                    print("DEBUG [PCD Create]: Transform applied.")
+                    
+                    stereo_output.point_cloud = pcd # Assign to the output object
+                    print(f"DEBUG [PCD Create]: Point cloud assigned to output. Final points: {len(pcd.points)}.")
+
+            except Exception as e:
+                print(f"ERROR [PCD Create]: Failed during point cloud creation: {e}")
+                import traceback
+                traceback.print_exc()
+                stereo_output.point_cloud = None # Ensure it's None on error
+        else:
+            print("DEBUG [PCD Create]: Skip - No valid stereo output or disparity map.")
+            if stereo_output:
+                 stereo_output.point_cloud = None # Ensure it's None if disparity was missing
+        # --- End Point Cloud Creation ---
+
         self.stereo_methods_output[name] = stereo_output
-        self._update_rendering([name])
-        self._update_runtime()
-    
+        self._update_runtime() # Update time label
+
+        print(f"DEBUG: Computation for {name} finished. Updating rendering.")
+        self._update_rendering([name]) # Update only the completed method's geometry
+
+        # Show disparity for the completed method
+        if self.stereo_methods_output[name].disparity_color is not None:
+            show_color_disparity(name, self.stereo_methods_output[name].disparity_color)
+
+        # --- Check if we need to loop in Live mode ---
+        if self.is_live_processing_active:
+            print("DEBUG: Live mode active, reading next pair")
+            self._processing_status_label.text = "Live: Fetching next..."
+            self.read_next_pair() # <<<--- Automatically start next frame
+        else:
+            self._processing_status_label.text = "Idle" # Update status
+
     def _depth_range_slider_changed(self, v: float):
         self._depth_range_manually_changed = True
         self._update_rendering()
 
     def _update_rendering(self, names_to_update=None):
-        print("DEBUG: Entering _update_rendering")
         if names_to_update is None:
             names_to_update = list(self.stereo_methods_output.keys())
 
-        selected_name = self.algo_list.selected_value
-        print(f"DEBUG: Selected method: {selected_name}")
+        cam = self._scene.scene.camera
+        width, height = self.window.size.width, self.window.size.height
+        if width > 0 and height > 0:
+            # Use get_near() and get_far() methods
+            cam.set_projection(cam.get_field_of_view(), width / height, \
+                cam.get_near(), cam.get_far(), cam.get_field_of_view_type())
 
+        updated = False
         for name in names_to_update:
-            stereo_output = self.stereo_methods_output[name]
-            if stereo_output.disparity_pixels is None:
-                print(f"DEBUG: No disparity pixels for {name}")
+            if name not in self.stereo_methods_output:
                 continue
+            o = self.stereo_methods_output[name]
+            if o.point_cloud is not None:
+                # Check if points are empty to avoid Open3D errors
+                if not o.point_cloud.has_points():
+                    if self._scene.scene.has_geometry(name):
+                        self._scene.scene.remove_geometry(name)
+                    continue # Skip empty point clouds
 
-            print(f"DEBUG: Processing {name} for visualization")
-            depth_meters = StereoMethod.depth_meters_from_disparity(stereo_output.disparity_pixels, self.input.calibration)
-            
-            # Debug depth values
-            print(f"DEBUG: Depth stats - min: {np.min(depth_meters)}, max: {np.max(depth_meters)}, mean: {np.mean(depth_meters)}")
-            print(f"DEBUG: Depth has NaNs: {np.any(np.isnan(depth_meters))}")
-            print(f"DEBUG: Depth has Infs: {np.any(np.isinf(depth_meters))}")
-            
-            # Ensure valid depth range
-            depth_meters = np.clip(depth_meters, 0.1, self.depth_range_slider.double_value)
-            depth_meters[depth_meters <= 0] = 0
-            depth_meters[np.isnan(depth_meters)] = 0
-            depth_meters[np.isinf(depth_meters)] = 0
+                material = rendering.MaterialRecord()
+                # material.shader = "unlitGradient"
+                material.shader = "defaultLit" # Try this shader instead
+                material.base_color = [0.7, 0.7, 0.7, 1.0]  # Give it a default color
+                # material.base_color = [1.0, 1.0, 1.0, 1.0]  # RGBA
+                material.point_size = 2 * self.window.scaling
+                
+                # Remove the old geometry if it exists
+                if self._scene.scene.has_geometry(name):
+                    self._scene.scene.remove_geometry(name)
+                
+                # Add the new geometry
+                self._scene.scene.add_geometry(name, o.point_cloud, material)
+                
+                updated = True
+            else:
+                # If the output point cloud is None, remove the geometry if it exists
+                if self._scene.scene.has_geometry(name):
+                    self._scene.scene.remove_geometry(name)
+                    updated = True
+        
+        # # Always show axes?
+        # if self.settings.show_axes:
+        #     if not self._scene.scene.has_geometry("__axes__"):
+        #         axes = o3d.geometry.TriangleMesh.create_coordinate_frame()
+        #         self._scene.scene.add_geometry("__axes__", axes, rendering.MaterialRecord())
+        # else:
+        #     if self._scene.scene.has_geometry("__axes__"):
+        #         self._scene.scene.remove_geometry("__axes__")
 
-            if self._scene.scene.has_geometry(name):
-                self._scene.scene.remove_geometry(name)
-
-            try:
-                if stereo_output.color_image_bgr is None:
-                    print("DEBUG: No color image in stereo output!")
-                    stereo_output.color_image_bgr = self.input.left_image.copy()
-                
-                print(f"DEBUG: Color image stats - min: {np.min(stereo_output.color_image_bgr)}, max: {np.max(stereo_output.color_image_bgr)}")
-                
-                o3d_color = o3d.geometry.Image(cv2.cvtColor(stereo_output.color_image_bgr, cv2.COLOR_BGR2RGB))
-                o3d_depth = o3d.geometry.Image(depth_meters.astype(np.float32))
-                print(f"DEBUG: Created o3d images - Color shape: {np.array(o3d_color).shape}, Depth shape: {np.array(o3d_depth).shape}")
-                
-                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                    o3d_color,
-                    o3d_depth,
-                    1,
-                    depth_trunc=self.depth_range_slider.double_value,
-                    convert_rgb_to_intensity=False)
-                
-                stereo_output.point_cloud = o3d.geometry.PointCloud.create_from_rgbd_image(
-                    rgbd, self.o3dCameraIntrinsic)
-                
-                # Debug point cloud before transform
-                print(f"DEBUG: Point cloud before transform - points: {len(stereo_output.point_cloud.points)}")
-                
-                stereo_output.point_cloud.transform([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-                
-                print(f"DEBUG: Created point cloud with {len(stereo_output.point_cloud.points)} points")
-                
-                if len(stereo_output.point_cloud.points) == 0:
-                    print("DEBUG: Warning - Empty point cloud after creation!")
-                else:
-                    self._scene.scene.add_geometry(name, stereo_output.point_cloud, rendering.MaterialRecord())
-                    self._scene.scene.show_geometry(name, name == selected_name)
-                
-            except Exception as e:
-                print(f"DEBUG: Error in visualization pipeline: {str(e)}")
-                import traceback
-                traceback.print_exc()
+        # This is essential for updating the scene after geometry changes
+        if updated:
+            self._scene.force_redraw()
 
     def _run_current_method(self):
-        if self.executor_future is not None:
-            return self._check_run_complete()
+        if self.executor_future is not None and not self.executor_future.done():
+            print("DEBUG: Computation already in progress.")
+            # Maybe update status briefly?
+            # self._processing_status_label.text = "Busy..."
+            # time.sleep(0.1)
+            # if not self.is_live_processing_active: # Revert if not live
+            #     self._processing_status_label.text = "Idle"
+            return # Don't start a new one if one is running
 
         if not self.input.has_data():
             print("DEBUG: Cannot run method - input has no data")
+            self._processing_status_label.text = "No Input Data"
             return
 
         name = self.algo_list.selected_value
         print(f"DEBUG: Running stereo method: {name}")
+        self._processing_status_label.text = f"Processing: {name}..." # <-- Update status
 
         def do_beefy_work():
-            print("DEBUG: Starting stereo computation")
-            stereo_output = self.stereo_methods[name].compute_disparity(self.input)
-            print(f"DEBUG: Stereo computation complete. Output shape: {stereo_output.disparity_pixels.shape if stereo_output.disparity_pixels is not None else None}")
-            return stereo_output
+            print("DEBUG: Starting stereo computation in background thread")
+            start_time = time.time()
+            try:
+                # Make a deep copy of the input to avoid race conditions if live mode updates it
+                compute_input = copy.deepcopy(self.input)
+                stereo_output = self.stereo_methods[name].compute_disparity(compute_input)
+                # Ensure computation_time is set
+                if stereo_output and np.isnan(stereo_output.computation_time):
+                     stereo_output.computation_time = time.time() - start_time
+                print(f"DEBUG: Stereo computation complete. Output shape: {stereo_output.disparity_pixels.shape if stereo_output and stereo_output.disparity_pixels is not None else None}")
+                return stereo_output
+            except Exception as e:
+                 print(f"ERROR during stereo computation thread for {name}: {e}")
+                 import traceback
+                 traceback.print_exc()
+                 # Return None or raise exception to signal failure in _check_run_complete
+                 raise e # Re-raise the exception
 
-        self._last_progress_update_time = time.time()
         self.executor_future = self.executor.submit(do_beefy_work)
-    
-    def _show_progress_dialog(self, title, message):
-        # A Dialog is just a widget, so you make its child a layout just like
-        # a Window.
-        dlg = gui.Dialog(title)
 
-        # Add the message text
-        em = self.window.theme.font_size
-        dlg_layout = gui.Vert(em, gui.Margins(em, em, em, em))
-        dlg_layout.add_child(gui.Label(message))
-
-        # Add the Ok button. We need to define a callback function to handle
-        # the click.
-        self._run_progress = gui.ProgressBar()
-        self._run_progress.value = 0.1  # 10% complete
-        prog_layout = gui.Horiz(em)
-        prog_layout.add_child(self._run_progress)
-        dlg_layout.add_child(prog_layout)
-
-        dlg.add_child(dlg_layout)
-        self.window.show_dialog(dlg)
-        return dlg
+    def _toggle_live_mode(self):
+        self.is_live_processing_active = not self.is_live_processing_active
+        if self.is_live_processing_active:
+            self._live_button.text = "Stop Live"
+            self._next_image_button.enabled = False # Disable Next while live
+            self._processing_status_label.text = "Live: Starting..."
+            # If not already processing, start the first frame
+            if self.executor_future is None or self.executor_future.done():
+                print("DEBUG: Starting live mode, reading first pair")
+                self.read_next_pair()
+            else:
+                 print("DEBUG: Live mode activated, but processing already running.")
+        else:
+            self._live_button.text = "Start Live"
+            self._next_image_button.enabled = True # Re-enable Next
+            self._processing_status_label.text = "Idle"
+            print("DEBUG: Stopping live mode.")
+            # Don't clear outputs, just stop requesting new frames
 
     def _update_runtime (self):
         name = self.algo_list.selected_value

@@ -9,6 +9,7 @@ Integrate a Syphon input source into the existing stereo demo Python application
 The application (`stereodemo`) currently supports input from:
 - Image files/directories (`FileListSource`)
 - OAK-D camera (`OakdSource`)
+- Syphon Source (`SyphonSource`)
 
 Processing involves selecting a stereo depth estimation method and visualizing the results.
 
@@ -48,8 +49,22 @@ Processing involves selecting a stereo depth estimation method and visualizing t
 - [x] Integrate `SyphonSource` instantiation in `main.py`.
 - [x] Add dependency management (`setup.cfg`).
 - [x] Add simple retry mechanism for Syphon connection in `SyphonSource`.
-- [ ] Test Syphon connection and frame retrieval.
 - [x] Handle calibration loading for `SyphonSource`.
 - [x] Add default automatic calibration for when no calibration file is provided.
+- [x] Fix point cloud persistence issue (keep old cloud visible during processing).
+- [x] Debug and fix segmentation fault related to rendering updates and intrinsic/image dimension mismatch.
+- [ ] Test Syphon connection and frame retrieval thoroughly.
 - [ ] Refine error handling.
-- [ ] Update documentation. 
+- [ ] Update documentation.
+
+## Recent Work: Rendering Fixes (Apr 7)
+
+*   **Goal:** Prevent the point cloud display from clearing while the next frame is processing.
+*   **Initial Problem:** The point cloud disappeared between frames because `_clear_outputs()` was called too early in `_process_input`.
+*   **Attempt 1:** Modified `_update_rendering` to use `update_geometry` instead of `remove_geometry`/`add_geometry`. This caused `AttributeError`s related to camera clipping planes.
+*   **Attempt 2:** Corrected camera API calls (`get_near`/`get_far`). Resulted in no point cloud rendering at all.
+*   **Attempt 3:** Realized the point cloud *creation* logic (disparity -> depth -> RGBD -> PointCloud) was accidentally removed during refactoring. Re-added this logic into `_check_run_complete`.
+*   **Attempt 4:** Restored UI buttons accidentally removed by the previous edit.
+*   **Attempt 5 (Segfault Debug):** Added detailed logging to `_check_run_complete`. Logs revealed the crash occurred *after* point cloud creation but during/before `_update_rendering`.
+*   **Root Cause:** Mismatch between image dimensions (e.g., HxW) and the dimensions used to initialize `o3d.camera.PinholeCameraIntrinsic` (e.g., WxH). 
+*   **Fix:** Modified `_process_input` to create the `PinholeCameraIntrinsic` using width/height derived directly from the processed `input.left_image.shape`. 
