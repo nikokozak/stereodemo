@@ -306,14 +306,17 @@ class Visualizer:
         left_display = input.left_image.copy()
         right_display = input.right_image.copy()
         
-        # Ensure images are BGR
+        # Convert to RGB for Open3D display
         if len(left_display.shape) == 2:  # Grayscale
-            left_display = cv2.cvtColor(left_display, cv2.COLOR_GRAY2BGR)
-            right_display = cv2.cvtColor(right_display, cv2.COLOR_GRAY2BGR)
-            
+            left_display = cv2.cvtColor(left_display, cv2.COLOR_GRAY2RGB)
+            right_display = cv2.cvtColor(right_display, cv2.COLOR_GRAY2RGB)
+        elif len(left_display.shape) == 3 and left_display.shape[2] == 3:  # BGR input
+            left_display = cv2.cvtColor(left_display, cv2.COLOR_BGR2RGB)
+            right_display = cv2.cvtColor(right_display, cv2.COLOR_BGR2RGB)
+
         print(f"DEBUG Visualizer: Displaying combined image with shape {left_display.shape}")
         combined_image = np.hstack([left_display, right_display])
-        imshow("StereoDemo - Input image", combined_image)
+        imshow("StereoDemo - Input image", combined_image)  # Open3D GUI expects RGB
         
         self.input = input
         self.input_status.text = f"Input: {input.left_image.shape[1]}x{input.left_image.shape[0]} " + input.status
@@ -532,9 +535,11 @@ class Visualizer:
                 
                 # Ensure color is RGB for Open3D
                 print("DEBUG [PCD Create]: Converting color to RGB...")
-                if len(color_image.shape) == 2: # Grayscale to BGR then RGB
-                     color_image = cv2.cvtColor(color_image, cv2.COLOR_GRAY2BGR)
-                o3d_color_np = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+                if len(color_image.shape) == 2: # Grayscale to RGB
+                    color_image = cv2.cvtColor(color_image, cv2.COLOR_GRAY2RGB)
+                else: # BGR to RGB
+                    color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+                o3d_color_np = color_image
                 print(f"DEBUG [PCD Create]: Creating o3d.geometry.Image for color (shape: {o3d_color_np.shape}, dtype: {o3d_color_np.dtype})...")
                 o3d_color = o3d.geometry.Image(o3d_color_np)
                 print("DEBUG [PCD Create]: o3d color image created.")

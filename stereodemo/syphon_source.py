@@ -279,8 +279,70 @@ class SyphonSource(Source):
                 # Get texture and convert to numpy array using the official method
                 metal_texture = self.client.new_frame_image
                 print(f"DEBUG: Obtained metal_texture: {type(metal_texture)}")
-                sbs_frame_rgb = copy_mtl_texture_to_image(metal_texture)
-                print(f"DEBUG: Converted texture to numpy array, shape: {sbs_frame_rgb.shape}")
+                print(f"DEBUG: Metal texture format: {metal_texture.pixelFormat}")
+                
+                # Get the frame and assume it's BGR (most likely from the GPU)
+                sbs_frame = copy_mtl_texture_to_image(metal_texture)
+                print(f"DEBUG: Converted texture to numpy array, shape: {sbs_frame.shape}")
+                print(f"DEBUG: Frame dtype: {sbs_frame.dtype}")
+                
+                # Debug: Print a small 3x3 patch of pixels to verify channel ordering
+                if sbs_frame.size > 0:
+                    patch = sbs_frame[0:3, 0:3]
+                    print("DEBUG: First 3x3 pixel patch (BGR channels):")
+                    for y in range(3):
+                        for x in range(3):
+                            pixel = patch[y,x]
+                            print(f"  [{x},{y}]: B={pixel[0]}, G={pixel[1]}, R={pixel[2]}")
+                
+                # Split the frame horizontally
+                height, total_width, _ = sbs_frame.shape
+                print(f"DEBUG: Full SBS frame shape: H={height}, W={total_width}")
+                mid_point = total_width // 2
+                print(f"DEBUG: Calculated mid_point: {mid_point}")
+                single_width = mid_point
+
+                # If we don't have a calibration yet, create a default one
+                if not self.calibration:
+                    self.calibration = self._create_default_calibration(single_width, height)
+
+                # Slice the frame into left and right images (keeping as BGR)
+                left_image = sbs_frame[:, :mid_point]
+                right_image = sbs_frame[:, mid_point:]
+                
+                print(f"DEBUG: Left frame shape: {left_image.shape}")
+                print(f"DEBUG: Right frame shape: {right_image.shape}")
+                print(f"DEBUG: Left frame min/max values: {left_image.min()}/{left_image.max()}")
+                print(f"DEBUG: Right frame min/max values: {right_image.min()}/{right_image.max()}")
+
+                # Create debug visualization (already in BGR for imshow)
+                debug_vis = np.hstack((left_image, right_image))
+                cv2.putText(debug_vis, "Calibrated Input (Source BGR)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                cv2.putText(debug_vis, f"Resolution: {single_width}x{height}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                cv2.imshow("Calibrated Input", debug_vis)
+                cv2.waitKey(1)
+
+                # Save debug images occasionally
+                if np.random.random() < 0.01:  # 1% chance to save debug images
+                    cv2.imwrite("debug_left.png", left_image)
+                    cv2.imwrite("debug_right.png", right_image)
+                    print("DEBUG: Saved debug images")
+
+                # Set status based on calibration type
+                status_prefix = "Using default calibration" if self.using_default_calibration else "Using loaded calibration"
+                status = f"{status_prefix}: {self.server_name}"
+
+                print("DEBUG: Frame successfully split. Returning InputPair with BGR images.")
+                input_pair = InputPair(left_image,
+                                    right_image,
+                                    self.calibration,
+                                    status)
+                
+                # Verify InputPair before returning
+                if not input_pair.has_data():
+                    raise RuntimeError("Created InputPair reports no data")
+                
+                return input_pair
 
             except Exception as e:
                 print(f"Error getting frame from Syphon: {e}. Attempting to reconnect...", file=sys.stderr)
@@ -292,83 +354,6 @@ class SyphonSource(Source):
                         raise RuntimeError("Reconnected client is not properly initialized")
                 else:
                     raise RuntimeError(f"Failed to reconnect to Syphon server")
-
-            # Split the frame horizontally
-            height, total_width, _ = sbs_frame_rgb.shape
-            print(f"DEBUG: Full SBS frame shape: H={height}, W={total_width}")
-            mid_point = total_width // 2
-            print(f"DEBUG: Calculated mid_point: {mid_point}")
-            single_width = mid_point
-
-            # If we don't have a calibration yet, create a default one
-            if not self.calibration:
-                self.calibration = self._create_default_calibration(single_width, height)
-
-            # Check if total width is roughly double the calibration width
-            if abs(total_width - 2 * self.calibration.width) > 2:  # Allow minor tolerance
-                if not self.using_default_calibration:
-                    print(f"Warning: Combined Syphon frame width ({total_width}) is not approx twice the "
-                          f"calibration width ({self.calibration.width}). Check calibration file or stream format.", file=sys.stderr)
-                else:
-                    # If using default calibration and it doesn't match, recreate it
-                    self.calibration = self._create_default_calibration(single_width, height)
-
-            # Check if frame height matches calibration height
-            if height != self.calibration.height and not self.using_default_calibration:
-                print(f"Warning: Syphon frame height ({height}) does not match calibration height "
-                      f"({self.calibration.height}). Check calibration file or stream format.", file=sys.stderr)
-
-            # Slice the frame into left and right images
-            left_frame_rgb = sbs_frame_rgb[:, :mid_point]
-            right_frame_rgb = sbs_frame_rgb[:, mid_point:]
-            print(f"DEBUG: Left frame shape: {left_frame_rgb.shape}")
-            print(f"DEBUG: Right frame shape: {right_frame_rgb.shape}")
-            print(f"DEBUG: Left frame min/max values: {left_frame_rgb.min()}/{left_frame_rgb.max()}")
-            print(f"DEBUG: Right frame min/max values: {right_frame_rgb.min()}/{right_frame_rgb.max()}")
-
-            # Ensure frames are in the format expected by the stereo methods (BGR)
-            left_image_bgr = cv2.cvtColor(left_frame_rgb, cv2.COLOR_RGB2BGR)
-            right_image_bgr = cv2.cvtColor(right_frame_rgb, cv2.COLOR_RGB2BGR)
-
-            # Verify converted images
-            print(f"DEBUG: BGR Left frame min/max values: {left_image_bgr.min()}/{left_image_bgr.max()}")
-            print(f"DEBUG: BGR Right frame min/max values: {right_image_bgr.min()}/{right_image_bgr.max()}")
-
-            # Validate images before creating InputPair
-            if left_image_bgr.size == 0 or right_image_bgr.size == 0:
-                raise RuntimeError("Empty image detected after conversion")
-            
-            if not np.any(left_image_bgr) or not np.any(right_image_bgr):
-                raise RuntimeError("Images contain only zeros")
-
-            # Create debug visualization
-            debug_vis = np.hstack((left_image_bgr, right_image_bgr))
-            cv2.putText(debug_vis, "Calibrated Input", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            cv2.putText(debug_vis, f"Resolution: {single_width}x{height}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            cv2.imshow("Calibrated Input", debug_vis)
-            cv2.waitKey(1)
-
-            # Save debug images occasionally
-            if np.random.random() < 0.01:  # 1% chance to save debug images
-                cv2.imwrite("debug_left.png", left_image_bgr)
-                cv2.imwrite("debug_right.png", right_image_bgr)
-                print("DEBUG: Saved debug images")
-
-            # Set status based on calibration type
-            status_prefix = "Using default calibration" if self.using_default_calibration else "Using loaded calibration"
-            status = f"{status_prefix}: {self.server_name}"
-
-            print("DEBUG: Frame successfully split and converted. Returning InputPair.")
-            input_pair = InputPair(left_image_bgr,
-                                 right_image_bgr,
-                                 self.calibration,
-                                 status)
-            
-            # Verify InputPair before returning
-            if not input_pair.has_data():
-                raise RuntimeError("Created InputPair reports no data")
-                
-            return input_pair
 
         except RuntimeError as e:
             print(f"DEBUG: Runtime Error in get_next_pair: {e}", file=sys.stderr)
