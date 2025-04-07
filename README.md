@@ -1,9 +1,12 @@
-[![Unit Tests](https://github.com/nburrus/stereodemo/actions/workflows/unit_tests.yml/badge.svg)](https://github.com/nburrus/stereodemo/actions/workflows/unit_tests.yml)
-<a href="https://twitter.com/nburrus">
-<img src="https://img.shields.io/twitter/url?label=Twitter&style=social&url=https%3A%2F%2Ftwitter.com%2Fnburrus" alt="Twitter Badge"/>
-</a>
-
 # stereodemo
+
+Forked - works with SyphonServer to receive images from stereo cameras and pipes them into the included models.
+
+Run `reinstall.sh` to install the Python utility.
+
+Run with `python -m stereodemo --syphon` to run the program with default calibration parameters.
+
+Has a calibration mode but the results it produces are unworkable at the moment.
 
 Small Python utility to **compare and visualize** the output of various **stereo depth estimation** algorithms:
 
