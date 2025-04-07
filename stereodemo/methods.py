@@ -23,11 +23,18 @@ class Calibration:
     comment: str = ""
 
     def to_json(self):
-        return json.dumps(self.__dict__)
+        # Create a copy of the dict and convert numpy array to list
+        d = self.__dict__.copy()
+        d['left_image_rect_normalized'] = self.left_image_rect_normalized.tolist()
+        d['depth_range'] = list(self.depth_range)  # Convert tuple to list
+        return json.dumps(d)
 
     @staticmethod
     def from_json(json_str):
         d = json.loads(json_str)
+        # Convert list back to numpy array
+        d['left_image_rect_normalized'] = np.array(d['left_image_rect_normalized'])
+        d['depth_range'] = tuple(d['depth_range'])  # Convert list back to tuple
         return Calibration(**d)
 
     def downsample(self, new_width: int, new_height: int):

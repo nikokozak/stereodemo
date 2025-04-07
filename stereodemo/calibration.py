@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from pathlib import Path
+import time
 import json
 from typing import List, Tuple, Optional
 from .methods import Calibration
@@ -85,22 +86,22 @@ class StereoCalibrator:
             mtx_left, dist_left, mtx_right, dist_right, self.image_size, R, T)
             
         # Create Calibration object
-        baseline_meters = abs(T[0]) / 1000.0  # Convert from mm to meters
+        baseline_meters = float(abs(T[0]) / 1000.0)  # Convert from mm to meters and ensure float type
         calib = Calibration(
-            width=self.image_size[0],
-            height=self.image_size[1],
-            fx=P1[0,0],  # Focal length from rectified projection matrix
-            fy=P1[1,1],
-            cx0=P1[0,2],  # Principal point from left camera
-            cx1=P2[0,2],  # Principal point from right camera
-            cy=P1[1,2],
+            width=int(self.image_size[0]),
+            height=int(self.image_size[1]),
+            fx=float(P1[0,0]),  # Focal length from rectified projection matrix
+            fy=float(P1[1,1]),
+            cx0=float(P1[0,2]),  # Principal point from left camera
+            cx1=float(P2[0,2]),  # Principal point from right camera
+            cy=float(P1[1,2]),
             baseline_meters=baseline_meters,
-            depth_range=(0.3, 20.0),  # Default depth range
+            depth_range=(0.3, 20.0),  # Default depth range is already Python native types
             left_image_rect_normalized=np.array([
-                roi_left[0]/self.image_size[0],
-                roi_left[1]/self.image_size[1],
-                (roi_left[0] + roi_left[2])/self.image_size[0],
-                (roi_left[1] + roi_left[3])/self.image_size[1]
+                float(roi_left[0])/float(self.image_size[0]),
+                float(roi_left[1])/float(self.image_size[1]),
+                float(roi_left[0] + roi_left[2])/float(self.image_size[0]),
+                float(roi_left[1] + roi_left[3])/float(self.image_size[1])
             ])
         )
         return calib

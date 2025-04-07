@@ -188,7 +188,7 @@ class SyphonSource(Source):
                 "height": height,
                 "baseline_meters": 0.075,  # Reasonable default
                 "fx": width * 0.8,         # Reasonable default focal length
-                "fy": width * 0.8,
+                "fy": height * 0.8,        # Base fy on height
                 "cx0": width/2.0,          # Principal point at center
                 "cx1": width/2.0,
                 "cy": height/2.0,
@@ -261,26 +261,32 @@ class SyphonSource(Source):
         if not self.client:
             raise RuntimeError("Syphon client is not connected.")
 
+        print("DEBUG: Entering get_next_pair")
+
         try:
             # Get the combined side-by-side frame from the Syphon client
             try:
                 # Check if there's a new frame
+                print("DEBUG: Checking for new Syphon frame...")
+                frame_wait_count = 0
                 while not self.client.has_new_frame:
-                    print("Waiting for new frame...", end="\r")
+                    print(f"Waiting for new frame... ({frame_wait_count})", end="\\r")
+                    frame_wait_count += 1
                     time.sleep(0.01)  # Short sleep to not hog CPU
-                    
+
+                print("\\nDEBUG: New frame detected (has_new_frame is True)")
+
                 # Get texture and convert to numpy array using the official method
                 metal_texture = self.client.new_frame_image
+                print(f"DEBUG: Obtained metal_texture: {type(metal_texture)}")
                 sbs_frame_rgb = copy_mtl_texture_to_image(metal_texture)
-                
+                print(f"DEBUG: Converted texture to numpy array, shape: {sbs_frame_rgb.shape}")
+
             except Exception as e:
                 print(f"Error getting frame from Syphon: {e}. Attempting to reconnect...", file=sys.stderr)
                 if self._connect_to_syphon(max_retries=3):
-                    # After reconnection, wait a moment to ensure client is ready
                     time.sleep(0.5)
-                    # Check if the client is properly initialized before proceeding
                     if hasattr(self.client, 'has_new_frame'):
-                        # Try again with the newly connected client
                         return self.get_next_pair()
                     else:
                         raise RuntimeError("Reconnected client is not properly initialized")
@@ -289,54 +295,87 @@ class SyphonSource(Source):
 
             # Split the frame horizontally
             height, total_width, _ = sbs_frame_rgb.shape
+            print(f"DEBUG: Full SBS frame shape: H={height}, W={total_width}")
             mid_point = total_width // 2
+            print(f"DEBUG: Calculated mid_point: {mid_point}")
             single_width = mid_point
-            
+
             # If we don't have a calibration yet, create a default one
             if not self.calibration:
                 self.calibration = self._create_default_calibration(single_width, height)
-            
+
             # Check if total width is roughly double the calibration width
-            if abs(total_width - 2 * self.calibration.width) > 2: # Allow minor tolerance
+            if abs(total_width - 2 * self.calibration.width) > 2:  # Allow minor tolerance
                 if not self.using_default_calibration:
                     print(f"Warning: Combined Syphon frame width ({total_width}) is not approx twice the "
                           f"calibration width ({self.calibration.width}). Check calibration file or stream format.", file=sys.stderr)
                 else:
                     # If using default calibration and it doesn't match, recreate it
                     self.calibration = self._create_default_calibration(single_width, height)
-            
+
             # Check if frame height matches calibration height
             if height != self.calibration.height and not self.using_default_calibration:
-                 print(f"Warning: Syphon frame height ({height}) does not match calibration height "
-                       f"({self.calibration.height}). Check calibration file or stream format.", file=sys.stderr)
+                print(f"Warning: Syphon frame height ({height}) does not match calibration height "
+                      f"({self.calibration.height}). Check calibration file or stream format.", file=sys.stderr)
 
             # Slice the frame into left and right images
             left_frame_rgb = sbs_frame_rgb[:, :mid_point]
             right_frame_rgb = sbs_frame_rgb[:, mid_point:]
+            print(f"DEBUG: Left frame shape: {left_frame_rgb.shape}")
+            print(f"DEBUG: Right frame shape: {right_frame_rgb.shape}")
+            print(f"DEBUG: Left frame min/max values: {left_frame_rgb.min()}/{left_frame_rgb.max()}")
+            print(f"DEBUG: Right frame min/max values: {right_frame_rgb.min()}/{right_frame_rgb.max()}")
 
             # Ensure frames are in the format expected by the stereo methods (BGR)
             left_image_bgr = cv2.cvtColor(left_frame_rgb, cv2.COLOR_RGB2BGR)
             right_image_bgr = cv2.cvtColor(right_frame_rgb, cv2.COLOR_RGB2BGR)
 
-            # Create status message
-            status_prefix = "Syphon (SBS)"
-            if self.using_default_calibration:
-                status = f"{status_prefix}: {self.server_name} - Using default calibration"
-            else:
-                status = f"{status_prefix}: {self.server_name}"
-            
-            return InputPair(left_image=left_image_bgr, 
-                             right_image=right_image_bgr, 
-                             calibration=self.calibration, 
-                             status=status)
+            # Verify converted images
+            print(f"DEBUG: BGR Left frame min/max values: {left_image_bgr.min()}/{left_image_bgr.max()}")
+            print(f"DEBUG: BGR Right frame min/max values: {right_image_bgr.min()}/{right_image_bgr.max()}")
 
+            # Validate images before creating InputPair
+            if left_image_bgr.size == 0 or right_image_bgr.size == 0:
+                raise RuntimeError("Empty image detected after conversion")
+            
+            if not np.any(left_image_bgr) or not np.any(right_image_bgr):
+                raise RuntimeError("Images contain only zeros")
+
+            # Create debug visualization
+            debug_vis = np.hstack((left_image_bgr, right_image_bgr))
+            cv2.putText(debug_vis, "Calibrated Input", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+            cv2.putText(debug_vis, f"Resolution: {single_width}x{height}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+            cv2.imshow("Calibrated Input", debug_vis)
+            cv2.waitKey(1)
+
+            # Save debug images occasionally
+            if np.random.random() < 0.01:  # 1% chance to save debug images
+                cv2.imwrite("debug_left.png", left_image_bgr)
+                cv2.imwrite("debug_right.png", right_image_bgr)
+                print("DEBUG: Saved debug images")
+
+            # Set status based on calibration type
+            status_prefix = "Using default calibration" if self.using_default_calibration else "Using loaded calibration"
+            status = f"{status_prefix}: {self.server_name}"
+
+            print("DEBUG: Frame successfully split and converted. Returning InputPair.")
+            input_pair = InputPair(left_image_bgr,
+                                 right_image_bgr,
+                                 self.calibration,
+                                 status)
+            
+            # Verify InputPair before returning
+            if not input_pair.has_data():
+                raise RuntimeError("Created InputPair reports no data")
+                
+            return input_pair
+
+        except RuntimeError as e:
+            print(f"DEBUG: Runtime Error in get_next_pair: {e}", file=sys.stderr)
+            raise e
         except Exception as e:
-            print(f"Error getting frames from Syphon: {e}", file=sys.stderr)
-            # Decide how to handle errors - return None? Raise exception? Retry?
-            # Raising an exception might stop the main loop.
-            # Returning a dummy pair might be better if occasional drops are okay.
-            # For now, re-raise the exception.
-            raise e # Or return a dummy InputPair(None, None, self.calibration, "Error")
+            print(f"DEBUG: Unexpected Error in get_next_pair: {e}", file=sys.stderr)
+            raise e
 
     def selected_index (self) -> int:
         """Not applicable for a live source."""

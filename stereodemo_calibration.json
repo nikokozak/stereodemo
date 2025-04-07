@@ -1,0 +1,21 @@
+{
+  "width": 480,
+  "height": 640,
+  "fx": 512.0,
+  "fy": 512.0,
+  "cx0": 240.0,
+  "cx1": 240.0,
+  "cy": 320.0,
+  "baseline_meters": 0.075,
+  "depth_range": [
+    0.5,
+    20.0
+  ],
+  "left_image_rect_normalized": [
+    0.0,
+    0.0,
+    1.0,
+    1.0
+  ],
+  "comment": "Default calibration for 480x640 resolution (per side)"
+} 

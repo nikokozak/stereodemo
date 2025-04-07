@@ -252,6 +252,8 @@ class Visualizer:
         self._process_input (input)
 
     def _process_input (self, input):
+        print(f"DEBUG Visualizer: Processing input with shape left={input.left_image.shape if input.left_image is not None else None}, right={input.right_image.shape if input.right_image is not None else None}")
+        
         if self._downsample_factor > 0:
             self.full_res_input = input
             input = copy.deepcopy(input)
@@ -262,22 +264,46 @@ class Visualizer:
         if not self._depth_range_manually_changed:
             self.depth_range_slider.double_value = input.calibration.depth_range[1]
 
-        imshow ("StereoDemo - Input image", np.hstack([input.left_image, input.right_image]))
+        if input.left_image is None or input.right_image is None:
+            print("DEBUG Visualizer: Input images are None!")
+            return
+
+        if not input.has_data():
+            print("DEBUG Visualizer: Input reports no data!")
+            return
+
+        # Create Open3D camera intrinsics from Calibration
+        self.o3dCameraIntrinsic = o3d.camera.PinholeCameraIntrinsic(
+            int(input.calibration.width),
+            int(input.calibration.height),
+            input.calibration.fx,
+            input.calibration.fy,
+            input.calibration.cx0, # Use cx0 for the left camera intrinsics
+            input.calibration.cy
+        )
+        print(f"DEBUG Visualizer: Updated o3dCameraIntrinsic: w={self.o3dCameraIntrinsic.width}, h={self.o3dCameraIntrinsic.height}, fx={self.o3dCameraIntrinsic.intrinsic_matrix[0,0]}")
+
+        # Create a copy of the images to avoid modifying the originals
+        left_display = input.left_image.copy()
+        right_display = input.right_image.copy()
+        
+        # Ensure images are BGR
+        if len(left_display.shape) == 2:  # Grayscale
+            left_display = cv2.cvtColor(left_display, cv2.COLOR_GRAY2BGR)
+            right_display = cv2.cvtColor(right_display, cv2.COLOR_GRAY2BGR)
+            
+        print(f"DEBUG Visualizer: Displaying combined image with shape {left_display.shape}")
+        combined_image = np.hstack([left_display, right_display])
+        imshow("StereoDemo - Input image", combined_image)
         
         self.input = input
         self.input_status.text = f"Input: {input.left_image.shape[1]}x{input.left_image.shape[0]} " + input.status
 
         if self.input.has_data():
+            print("DEBUG Visualizer: Input has data, proceeding with processing")
             assert self.input.left_image.shape[1] == self.input.calibration.width and self.input.left_image.shape[0] == self.input.calibration.height
-            self.o3dCameraIntrinsic = o3d.camera.PinholeCameraIntrinsic(width=self.input.left_image.shape[1],
-                                                                        height=self.input.left_image.shape[0],
-                                                                        fx=self.input.calibration.fx,
-                                                                        fy=self.input.calibration.fy,
-                                                                        cx=self.input.calibration.cx0,
-                                                                        cy=self.input.calibration.cy)
-
-            self._clear_outputs ()
-            self._run_current_method ()
+            self._clear_outputs()
+            self._run_current_method()
 
     def update_once (self):
         if self.executor_future is not None:
@@ -375,16 +401,27 @@ class Visualizer:
         return container
 
     def _on_algo_list_selected(self, name: str, is_dbl_click: bool):
+        print(f"DEBUG: Method selected: {name}")
         self.method_params_proxy.set_widget(self._build_stereo_method_widgets(name))
-        self._update_runtime ()
+        self._update_runtime()
+        
+        print("DEBUG: Updating geometry visibility")
         for other_name in self.stereo_methods_output.keys():
+            print(f"DEBUG: Setting {other_name} visibility to False")
             self._scene.scene.show_geometry(other_name, False)
+        
+        print(f"DEBUG: Setting {name} visibility to True")
         self._scene.scene.show_geometry(name, True)
+        
         self._apply_settings()
+        
         if self.stereo_methods_output[name].disparity_pixels is None:
-            self._run_current_method ()
+            print(f"DEBUG: No disparity map for {name}, running method")
+            self._run_current_method()
+        
         if self.stereo_methods_output[name].disparity_color is not None:
-            show_color_disparity (name, self.stereo_methods_output[name].disparity_color)
+            print(f"DEBUG: Showing color disparity for {name}")
+            show_color_disparity(name, self.stereo_methods_output[name].disparity_color)
 
     def _on_show_axes(self, show):
         self.settings.show_axes = show
@@ -423,11 +460,21 @@ class Visualizer:
             return
 
         if self._progress_dialog:
-            self.window.close_dialog ()
+            self.window.close_dialog()
         self._progress_dialog = None
 
+        print("DEBUG: Retrieving stereo computation result")
         stereo_output = self.executor_future.result()
         self.executor_future = None
+
+        if stereo_output.disparity_pixels is None:
+            print("DEBUG: No disparity map in stereo output!")
+            return
+
+        print(f"DEBUG: Processing disparity map with shape: {stereo_output.disparity_pixels.shape}")
+        raw_disp = stereo_output.disparity_pixels
+        print(f"DEBUG: Raw Disparity Stats - min: {np.min(raw_disp):.2f}, max: {np.max(raw_disp):.2f}, mean: {np.mean(raw_disp):.2f}")
+        print(f"DEBUG: Raw Disparity - Num positive: {np.sum(raw_disp > 0)}, Num zero: {np.sum(raw_disp == 0)}, Num negative: {np.sum(raw_disp < 0)}")
 
         x0,y0,x1,y1 = self.input.calibration.left_image_rect_normalized
         x0 = int(x0*stereo_output.disparity_pixels.shape[1] + 0.5)
@@ -439,61 +486,108 @@ class Visualizer:
         stereo_output.disparity_pixels[valid_mask == 0] = -1.0
 
         name = self.algo_list.selected_value
-        stereo_output.disparity_color = color_disparity (stereo_output.disparity_pixels, self.input.calibration)
-        show_color_disparity (name, stereo_output.disparity_color)
+        print("DEBUG: Creating color disparity map")
+        stereo_output.disparity_color = color_disparity(stereo_output.disparity_pixels, self.input.calibration)
+        show_color_disparity(name, stereo_output.disparity_color)
 
+        print("DEBUG: Updating stereo output and rendering")
         self.stereo_methods_output[name] = stereo_output
-        self._update_rendering ([name])
-        self._update_runtime ()
+        self._update_rendering([name])
+        self._update_runtime()
     
     def _depth_range_slider_changed(self, v: float):
         self._depth_range_manually_changed = True
         self._update_rendering()
 
-    def _update_rendering (self, names_to_update=None):
+    def _update_rendering(self, names_to_update=None):
+        print("DEBUG: Entering _update_rendering")
         if names_to_update is None:
             names_to_update = list(self.stereo_methods_output.keys())
 
         selected_name = self.algo_list.selected_value
+        print(f"DEBUG: Selected method: {selected_name}")
 
         for name in names_to_update:
             stereo_output = self.stereo_methods_output[name]
             if stereo_output.disparity_pixels is None:
+                print(f"DEBUG: No disparity pixels for {name}")
                 continue
 
+            print(f"DEBUG: Processing {name} for visualization")
             depth_meters = StereoMethod.depth_meters_from_disparity(stereo_output.disparity_pixels, self.input.calibration)
+            
+            # Debug depth values
+            print(f"DEBUG: Depth stats - min: {np.min(depth_meters)}, max: {np.max(depth_meters)}, mean: {np.mean(depth_meters)}")
+            print(f"DEBUG: Depth has NaNs: {np.any(np.isnan(depth_meters))}")
+            print(f"DEBUG: Depth has Infs: {np.any(np.isinf(depth_meters))}")
+            
+            # Ensure valid depth range
+            depth_meters = np.clip(depth_meters, 0.1, self.depth_range_slider.double_value)
+            depth_meters[depth_meters <= 0] = 0
+            depth_meters[np.isnan(depth_meters)] = 0
+            depth_meters[np.isinf(depth_meters)] = 0
 
             if self._scene.scene.has_geometry(name):
                 self._scene.scene.remove_geometry(name)
 
+            try:
+                if stereo_output.color_image_bgr is None:
+                    print("DEBUG: No color image in stereo output!")
+                    stereo_output.color_image_bgr = self.input.left_image.copy()
+                
+                print(f"DEBUG: Color image stats - min: {np.min(stereo_output.color_image_bgr)}, max: {np.max(stereo_output.color_image_bgr)}")
+                
+                o3d_color = o3d.geometry.Image(cv2.cvtColor(stereo_output.color_image_bgr, cv2.COLOR_BGR2RGB))
+                o3d_depth = o3d.geometry.Image(depth_meters.astype(np.float32))
+                print(f"DEBUG: Created o3d images - Color shape: {np.array(o3d_color).shape}, Depth shape: {np.array(o3d_depth).shape}")
+                
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    o3d_color,
+                    o3d_depth,
+                    1,
+                    depth_trunc=self.depth_range_slider.double_value,
+                    convert_rgb_to_intensity=False)
+                
+                stereo_output.point_cloud = o3d.geometry.PointCloud.create_from_rgbd_image(
+                    rgbd, self.o3dCameraIntrinsic)
+                
+                # Debug point cloud before transform
+                print(f"DEBUG: Point cloud before transform - points: {len(stereo_output.point_cloud.points)}")
+                
+                stereo_output.point_cloud.transform([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+                
+                print(f"DEBUG: Created point cloud with {len(stereo_output.point_cloud.points)} points")
+                
+                if len(stereo_output.point_cloud.points) == 0:
+                    print("DEBUG: Warning - Empty point cloud after creation!")
+                else:
+                    self._scene.scene.add_geometry(name, stereo_output.point_cloud, rendering.MaterialRecord())
+                    self._scene.scene.show_geometry(name, name == selected_name)
+                
+            except Exception as e:
+                print(f"DEBUG: Error in visualization pipeline: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
-            o3d_color = o3d.geometry.Image(cv2.cvtColor(stereo_output.color_image_bgr, cv2.COLOR_BGR2RGB))
-            o3d_depth = o3d.geometry.Image(depth_meters)
-            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d_color,
-                                                                      o3d_depth,
-                                                                      1,
-                                                                      depth_trunc=self.depth_range_slider.int_value,
-                                                                      convert_rgb_to_intensity=False)
-            stereo_output.point_cloud = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, self.o3dCameraIntrinsic)
-            stereo_output.point_cloud.transform([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-            self._scene.scene.add_geometry(name, stereo_output.point_cloud, rendering.MaterialRecord())
-            self._scene.scene.show_geometry(name, name == selected_name)
-    
     def _run_current_method(self):
         if self.executor_future is not None:
-            return self._check_run_complete ()
+            return self._check_run_complete()
 
         if not self.input.has_data():
+            print("DEBUG: Cannot run method - input has no data")
             return
 
         name = self.algo_list.selected_value
+        print(f"DEBUG: Running stereo method: {name}")
 
         def do_beefy_work():
-            stereo_output = self.stereo_methods[name].compute_disparity (self.input)
+            print("DEBUG: Starting stereo computation")
+            stereo_output = self.stereo_methods[name].compute_disparity(self.input)
+            print(f"DEBUG: Stereo computation complete. Output shape: {stereo_output.disparity_pixels.shape if stereo_output.disparity_pixels is not None else None}")
             return stereo_output
 
         self._last_progress_update_time = time.time()
-        self.executor_future = self.executor.submit (do_beefy_work)
+        self.executor_future = self.executor.submit(do_beefy_work)
     
     def _show_progress_dialog(self, title, message):
         # A Dialog is just a widget, so you make its child a layout just like
